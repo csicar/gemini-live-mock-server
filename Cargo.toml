@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -16,3 +17,5 @@ rubato = "0.16"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }

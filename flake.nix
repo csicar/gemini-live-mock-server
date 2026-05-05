@@ -30,32 +30,32 @@
             isStatic = true;
           };
         };
-      in
-      {
-        packages.default = pkgsMusl.rustPlatform.buildRustPackage {
-          pname = "x-phone-rust";
+
+        commonMeta = {
+          pname = "gemini-live-mock-server";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
+        };
+      in
+      {
+        # Default package: dynamic linking for the host system
+        packages.default = pkgs.rustPlatform.buildRustPackage (commonMeta // {
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+        });
 
-          nativeBuildInputs = with pkgsMusl; [ cmake pkg-config ];
-          buildInputs = with pkgsMusl; [ libopus openssl.dev ];
+        # Static musl build
+        packages.static = pkgsMusl.rustPlatform.buildRustPackage (commonMeta // {
+          nativeBuildInputs = with pkgsMusl; [ pkg-config ];
 
           CARGO_BUILD_TARGET = "x86_64-unknown-linux-musl";
           CARGO_BUILD_RUSTFLAGS = [ "-C" "target-feature=+crt-static" ];
-        };
+        });
 
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rustToolchain
-            pkgs.cmake
             pkgs.pkg-config
-            pkgs.libopus
-            pkgs.openssl.dev
-            pkgs.alsa-lib
-
-            # testing
-            pkgs.sipp
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         };
@@ -69,13 +69,8 @@
           pkgs.mkShell {
             buildInputs = [
               rustToolchain
-              # native host tools
-              pkgs.cmake
               pkgs.pkg-config
-              # musl C compiler and static libopus
               pkgsMusl.stdenv.cc
-              pkgsMusl.libopus
-              pkgsMusl.openssl.dev
             ];
             RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
             CARGO_BUILD_TARGET = musltarget;
@@ -84,12 +79,7 @@
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER" = muslcc;
             CC_x86_64_unknown_linux_musl = muslcc;
             CXX_x86_64_unknown_linux_musl = muslcxx;
-            # pkg-config for the musl libopus
-            PKG_CONFIG_ALLOW_CROSS = "1";
-            PKG_CONFIG_ALL_STATIC = "1";
-            PKG_CONFIG_PATH = "${pkgsMusl.libopus}/lib/pkgconfig:${pkgsMusl.openssl.dev}/lib/pkgconfig";
           };
       }
     );
 }
-

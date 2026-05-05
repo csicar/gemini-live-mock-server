@@ -1,87 +1,166 @@
 use crate::config::Config;
 use crate::protocol::ClientMessage;
 use crate::session::{Session, SessionEvent};
+use axum::{
+    Router,
+    extract::{
+        ConnectInfo, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
+    response::IntoResponse,
+    routing::get,
+};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
-use tokio::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tokio_util::sync::CancellationToken;
+use tower_http::trace::TraceLayer;
+use tracing::{debug, error, info, warn};
 
 pub async fn run_server(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(&config.listen).await?;
-    info!("Mock Gemini Live server listening on {}", config.listen);
+    let listen_addr = config.listen;
+    let app_state = Arc::new(config);
 
-    loop {
-        let (stream, addr) = listener.accept().await?;
-        let config = config.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, addr, config).await {
-                error!("Connection error from {}: {}", addr, e);
-            }
-        });
-    }
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .route("/", get(ws_handler))
+        .route("/health", get(health_handler))
+        .layer(TraceLayer::new_for_http())
+        .with_state(app_state);
+
+    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
+    info!("Mock Gemini Live server listening on {}", listen_addr);
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+
+    Ok(())
 }
 
-async fn handle_connection(
-    stream: TcpStream,
-    addr: SocketAddr,
-    config: Config,
-) -> Result<(), Box<dyn std::error::Error>> {
-    info!("New connection from {}", addr);
+async fn health_handler() -> impl IntoResponse {
+    "OK"
+}
 
-    let ws_stream = accept_async(stream).await?;
-    let (mut ws_sink, mut ws_stream) = ws_stream.split();
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(config): State<Arc<Config>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    info!(client_addr = %addr, "WebSocket upgrade request");
+    ws.on_upgrade(move |socket| handle_connection(socket, addr, (*config).clone()))
+}
+
+async fn handle_connection(socket: WebSocket, addr: SocketAddr, config: Config) {
+    info!(client_addr = %addr, "WebSocket connection established");
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+
+    // Create cancellation token for this connection
+    let cancellation_token = CancellationToken::new();
 
     // Create session
     let session_id = uuid::Uuid::new_v4().to_string();
     let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(32);
-    let mut session = Session::new(session_id.clone(), config, event_tx);
+    let mut session = Session::new(
+        session_id.clone(),
+        config,
+        event_tx,
+        cancellation_token.clone(),
+    );
 
-    info!("Session {} created for {}", session_id, addr);
+    info!(
+        session_id = %session_id,
+        client_addr = %addr,
+        "Session created"
+    );
 
     loop {
         tokio::select! {
+            // Handle cancellation
+            _ = cancellation_token.cancelled() => {
+                info!(session_id = %session_id, "Session cancelled");
+                let _ = ws_sink.close().await;
+                break;
+            }
+
             // Handle incoming WebSocket messages
             msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        debug!(
+                            session_id = %session_id,
+                            message_len = text.len(),
+                            "Received text message"
+                        );
                         match serde_json::from_str::<ClientMessage>(&text) {
                             Ok(client_msg) => {
+                                let msg_type = client_msg.message_type();
+                                info!(
+                                    session_id = %session_id,
+                                    message_type = %msg_type,
+                                    "Processing client message"
+                                );
                                 session.handle_message(client_msg).await;
                             }
                             Err(e) => {
-                                warn!("Failed to parse message: {e}");
-                                warn!("Raw message: {text}");
+                                warn!(
+                                    session_id = %session_id,
+                                    error = %e,
+                                    "Failed to parse message"
+                                );
+                                debug!(raw_message = %text, "Raw unparseable message");
                             }
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
+                        debug!(
+                            session_id = %session_id,
+                            data_len = data.len(),
+                            "Received binary message"
+                        );
                         // Try to parse binary as JSON (some clients send as binary)
                         if let Ok(text) = String::from_utf8(data.to_vec()) {
                             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
+                                let msg_type = client_msg.message_type();
+                                info!(
+                                    session_id = %session_id,
+                                    message_type = %msg_type,
+                                    "Processing client message (binary)"
+                                );
                                 session.handle_message(client_msg).await;
                             }
                         }
                     }
                     Some(Ok(Message::Close(_))) => {
-                        info!("Session {} received close from {}", session_id, addr);
+                        info!(
+                            session_id = %session_id,
+                            client_addr = %addr,
+                            "Client sent close frame"
+                        );
+                        cancellation_token.cancel();
                         break;
                     }
                     Some(Ok(Message::Ping(data))) => {
+                        debug!(session_id = %session_id, "Received ping");
                         if let Err(e) = ws_sink.send(Message::Pong(data)).await {
-                            warn!("Failed to send pong: {e}");
+                            warn!(session_id = %session_id, error = %e, "Failed to send pong");
                         }
                     }
-                    Some(Ok(_)) => {
-                        // Ignore other message types
+                    Some(Ok(Message::Pong(_))) => {
+                        debug!(session_id = %session_id, "Received pong");
                     }
                     Some(Err(e)) => {
-                        error!("WebSocket error: {e}");
+                        error!(session_id = %session_id, error = %e, "WebSocket error");
+                        cancellation_token.cancel();
                         break;
                     }
                     None => {
-                        info!("Session {} connection closed", session_id);
+                        info!(session_id = %session_id, "Connection closed");
+                        cancellation_token.cancel();
                         break;
                     }
                 }
@@ -91,17 +170,27 @@ async fn handle_connection(
             event = event_rx.recv() => {
                 match event {
                     Some(SessionEvent::SendMessage(json)) => {
+                        debug!(
+                            session_id = %session_id,
+                            message_len = json.len(),
+                            "Sending message to client"
+                        );
                         if let Err(e) = ws_sink.send(Message::Text(json.into())).await {
-                            error!("Failed to send message: {e}");
+                            error!(session_id = %session_id, error = %e, "Failed to send message");
+                            cancellation_token.cancel();
                             break;
                         }
                     }
                     Some(SessionEvent::Close) => {
+                        info!(session_id = %session_id, "Closing connection");
+                        cancellation_token.cancel();
                         let _ = ws_sink.close().await;
                         break;
                     }
                     None => {
                         // Channel closed
+                        debug!(session_id = %session_id, "Event channel closed");
+                        cancellation_token.cancel();
                         break;
                     }
                 }
@@ -110,6 +199,9 @@ async fn handle_connection(
     }
 
     session.finalize();
-    info!("Session {} ended", session_id);
-    Ok(())
+    info!(
+        session_id = %session_id,
+        client_addr = %addr,
+        "Session ended"
+    );
 }

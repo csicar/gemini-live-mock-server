@@ -18,6 +18,23 @@ pub struct ClientMessage {
     pub tool_response: Option<ToolResponse>,
 }
 
+impl ClientMessage {
+    /// Returns a string describing the type of message
+    pub fn message_type(&self) -> &'static str {
+        if self.setup.is_some() {
+            "setup"
+        } else if self.client_content.is_some() {
+            "client_content"
+        } else if self.realtime_input.is_some() {
+            "realtime_input"
+        } else if self.tool_response.is_some() {
+            "tool_response"
+        } else {
+            "unknown"
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Setup {
