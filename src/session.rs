@@ -1,8 +1,8 @@
+use crate::ServerConfig;
 use crate::audio::AudioLogger;
-use crate::config::Config;
 use crate::mock_response::{
-    generate_audio_response, generate_text_response, generate_tool_call, generate_turn_complete,
-    generate_usage_metadata,
+    generate_audio_response, generate_interrupted, generate_text_response, generate_tool_call,
+    generate_turn_complete, generate_usage_metadata,
 };
 use crate::protocol::{
     ClientContent, ClientMessage, RealtimeInput, SetupComplete, SetupCompleteMessage,
@@ -35,7 +35,7 @@ pub enum SessionEvent {
 pub struct Session {
     pub id: String,
     state: SessionState,
-    config: Config,
+    config: ServerConfig,
     vad: Vad,
     audio_logger: AudioLogger,
     turn_count: u32,
@@ -49,7 +49,7 @@ pub struct Session {
 impl Session {
     pub fn new(
         id: String,
-        config: Config,
+        config: ServerConfig,
         event_tx: mpsc::Sender<SessionEvent>,
         cancellation_token: CancellationToken,
     ) -> Self {
@@ -305,8 +305,14 @@ impl Session {
                         info!(
                             session_id = %self.id,
                             discarded_samples = self.audio_buffer.len(),
+                            was_awaiting_tool = self.awaiting_tool_response,
                             "VAD: Barge-in detected - interrupting response"
                         );
+                        // Send interrupted message to client
+                        let interrupted = generate_interrupted();
+                        self.send_json(&interrupted).await;
+                        // Reset tool response state if we were waiting for one
+                        self.awaiting_tool_response = false;
                         self.state = SessionState::ReceivingAudio;
                     } else {
                         info!(

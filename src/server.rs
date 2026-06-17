@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::ServerConfig;
 use crate::protocol::ClientMessage;
 use crate::session::{Session, SessionEvent};
 use axum::{
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
-pub async fn run_server(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = config.listen;
     let app_state = Arc::new(config);
 
@@ -47,14 +47,14 @@ async fn health_handler() -> impl IntoResponse {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(config): State<Arc<Config>>,
+    State(config): State<Arc<ServerConfig>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     info!(client_addr = %addr, "WebSocket upgrade request");
     ws.on_upgrade(move |socket| handle_connection(socket, addr, (*config).clone()))
 }
 
-async fn handle_connection(socket: WebSocket, addr: SocketAddr, config: Config) {
+async fn handle_connection(socket: WebSocket, addr: SocketAddr, config: ServerConfig) {
     info!(client_addr = %addr, "WebSocket connection established");
 
     let (mut ws_sink, mut ws_stream) = socket.split();

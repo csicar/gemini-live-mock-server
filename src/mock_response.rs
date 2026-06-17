@@ -33,6 +33,17 @@ pub fn generate_turn_complete() -> ServerContentMessage {
     }
 }
 
+/// Generate an interrupted message (sent when barge-in/interruption occurs)
+pub fn generate_interrupted() -> ServerContentMessage {
+    ServerContentMessage {
+        server_content: ServerContent {
+            model_turn: None,
+            turn_complete: None,
+            interrupted: Some(true),
+        },
+    }
+}
+
 /// Generate mock usage metadata
 pub fn generate_usage_metadata() -> UsageMetadataMessage {
     UsageMetadataMessage {
