@@ -79,7 +79,7 @@
 //! | `tool_call_interval` | `0` | Emit a tool call every N turns (0 = disabled) |
 //! | `vad_energy_threshold` | `0.01` | RMS energy threshold for speech detection |
 //! | `vad_silence_frames` | `30` | Silence frames before end-of-turn |
-//! | `audio_output_dir` | `./audio_logs` | Directory to write audio log files |
+//! | `audio_output_dir` | `None` | Directory to write audio log files (disabled if `None`) |
 //!
 //! ## Protocol
 //!
@@ -155,7 +155,7 @@ pub use session::{Session, SessionEvent, SessionState};
 ///     listen: "0.0.0.0:9000".parse().unwrap(),
 ///     response_delay: 100,
 ///     tool_call_interval: 3,  // Tool call every 3rd turn
-///     audio_output_dir: PathBuf::from("/tmp/test_audio"),
+///     audio_output_dir: Some(PathBuf::from("/tmp/test_audio")),
 ///     ..Default::default()
 /// };
 /// ```
@@ -195,7 +195,8 @@ pub struct ServerConfig {
     ///
     /// Each session creates two WAV files: `{session_id}_input.wav` (16kHz)
     /// and `{session_id}_output.wav` (24kHz). Useful for debugging audio issues.
-    pub audio_output_dir: PathBuf,
+    /// Set to `None` to disable audio logging entirely.
+    pub audio_output_dir: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -206,7 +207,7 @@ impl Default for ServerConfig {
             tool_call_interval: 0,
             vad_energy_threshold: 0.01,
             vad_silence_frames: 30,
-            audio_output_dir: PathBuf::from("./audio_logs"),
+            audio_output_dir: None,
         }
     }
 }

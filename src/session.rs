@@ -37,7 +37,7 @@ pub struct Session {
     state: SessionState,
     config: ServerConfig,
     vad: Vad,
-    audio_logger: AudioLogger,
+    audio_logger: Option<AudioLogger>,
     turn_count: u32,
     audio_buffer: Vec<i16>,
     event_tx: mpsc::Sender<SessionEvent>,
@@ -53,8 +53,9 @@ impl Session {
         event_tx: mpsc::Sender<SessionEvent>,
         cancellation_token: CancellationToken,
     ) -> Self {
-        let audio_logger =
-            AudioLogger::new(id.clone(), config.audio_output_dir.clone()).expect("Failed to create audio logger");
+        let audio_logger = config.audio_output_dir.as_ref().map(|dir| {
+            AudioLogger::new(id.clone(), dir.clone()).expect("Failed to create audio logger")
+        });
 
         let vad = Vad::new(config.vad_energy_threshold, config.vad_silence_frames);
 
@@ -284,8 +285,10 @@ impl Session {
         }
 
         // Write to audio logger
-        if let Err(e) = self.audio_logger.write_input(&samples) {
-            warn!(session_id = %self.id, error = %e, "Failed to write input audio");
+        if let Some(ref mut logger) = self.audio_logger {
+            if let Err(e) = logger.write_input(&samples) {
+                warn!(session_id = %self.id, error = %e, "Failed to write input audio");
+            }
         }
 
         // Update state if we weren't already receiving audio
@@ -443,8 +446,10 @@ impl Session {
                                     .chunks_exact(2)
                                     .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
                                     .collect();
-                                if let Err(e) = self.audio_logger.write_output(&samples) {
-                                    warn!("Failed to write output audio: {e}");
+                                if let Some(ref mut logger) = self.audio_logger {
+                                    if let Err(e) = logger.write_output(&samples) {
+                                        warn!("Failed to write output audio: {e}");
+                                    }
                                 }
                             }
                         }
@@ -514,8 +519,10 @@ impl Session {
 
     /// Finalize the session and clean up resources
     pub fn finalize(self) {
-        if let Err(e) = self.audio_logger.finalize() {
-            warn!(session_id = %self.id, error = %e, "Failed to finalize audio logger");
+        if let Some(logger) = self.audio_logger {
+            if let Err(e) = logger.finalize() {
+                warn!(session_id = %self.id, error = %e, "Failed to finalize audio logger");
+            }
         }
         info!(
             session_id = %self.id,

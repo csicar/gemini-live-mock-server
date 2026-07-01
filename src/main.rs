@@ -29,9 +29,9 @@ struct CliConfig {
     #[arg(long, default_value = "30")]
     vad_silence_frames: u32,
 
-    /// Directory for audio log files
+    /// Directory for audio log files (omit to disable audio logging)
     #[arg(long, default_value = "./audio_logs")]
-    audio_output_dir: PathBuf,
+    audio_output_dir: Option<PathBuf>,
 }
 
 impl From<CliConfig> for ServerConfig {
@@ -71,7 +71,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     info!("  VAD energy threshold: {}", config.vad_energy_threshold);
     info!("  VAD silence frames: {}", config.vad_silence_frames);
-    info!("  Audio output dir: {}", config.audio_output_dir.display());
+    info!(
+        "  Audio output dir: {}",
+        config
+            .audio_output_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "disabled".to_string())
+    );
 
     run_server(config).await
 }
