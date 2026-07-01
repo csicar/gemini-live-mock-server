@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         "  Tool call interval: {}",
         config
-            .tool_call_interval_option()
+            .tool_call_interval
             .map(|n| n.to_string())
             .unwrap_or_else(|| "disabled".to_string())
     );

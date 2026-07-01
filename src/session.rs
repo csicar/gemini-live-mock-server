@@ -404,7 +404,7 @@ impl Session {
         }
 
         // Check if we should trigger a tool call
-        if let Some(interval) = self.config.tool_call_interval_option() {
+        if let Some(interval) = self.config.tool_call_interval {
             if self.turn_count % interval == 0 {
                 self.send_tool_call().await;
                 return;
