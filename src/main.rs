@@ -17,9 +17,9 @@ struct CliConfig {
     #[arg(long, default_value = "200")]
     response_delay: u64,
 
-    /// Trigger a tool call every N turns (0 = never)
-    #[arg(long, default_value = "0")]
-    tool_call_interval: u32,
+    /// Trigger a tool call every N turns (omit to disable)
+    #[arg(long)]
+    tool_call_interval: Option<u32>,
 
     /// Energy threshold for VAD speech detection (RMS value)
     #[arg(long, default_value = "0.01")]

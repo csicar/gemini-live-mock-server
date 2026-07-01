@@ -76,7 +76,7 @@
 //! |-------|---------|-------------|
 //! | `listen` | `127.0.0.1:8080` | Socket address to bind the server |
 //! | `response_delay` | `200` | Milliseconds to wait before generating a response |
-//! | `tool_call_interval` | `0` | Emit a tool call every N turns (0 = disabled) |
+//! | `tool_call_interval` | `None` | Emit a tool call every N turns (`None` = disabled) |
 //! | `vad_energy_threshold` | `0.01` | RMS energy threshold for speech detection |
 //! | `vad_silence_frames` | `30` | Silence frames before end-of-turn |
 //! | `audio_output_dir` | `None` | Directory to write audio log files (disabled if `None`) |
@@ -108,7 +108,7 @@
 //! use gemini_live_mock_server::ServerConfig;
 //!
 //! let config = ServerConfig {
-//!     tool_call_interval: 2,  // Every 2nd turn triggers a tool call
+//!     tool_call_interval: Some(2),  // Every 2nd turn triggers a tool call
 //!     ..Default::default()
 //! };
 //! ```
@@ -154,7 +154,7 @@ pub use session::{Session, SessionEvent, SessionState};
 /// let config = ServerConfig {
 ///     listen: "0.0.0.0:9000".parse().unwrap(),
 ///     response_delay: 100,
-///     tool_call_interval: 3,  // Tool call every 3rd turn
+///     tool_call_interval: Some(3),  // Tool call every 3rd turn
 ///     audio_output_dir: Some(PathBuf::from("/tmp/test_audio")),
 ///     ..Default::default()
 /// };
@@ -172,12 +172,12 @@ pub struct ServerConfig {
     /// (e.g., 50ms) for faster tests.
     pub response_delay: u64,
 
-    /// Emit a tool call every N turns. Set to 0 to disable tool calls.
+    /// Emit a tool call every N turns. Set to `None` to disable tool calls.
     ///
     /// When enabled, the server sends a `get_current_weather` tool call instead
     /// of a normal response on every Nth turn. The client must respond with a
     /// `ToolResponse` before the server continues.
-    pub tool_call_interval: u32,
+    pub tool_call_interval: Option<u32>,
 
     /// RMS energy threshold for Voice Activity Detection (VAD).
     ///
@@ -204,21 +204,10 @@ impl Default for ServerConfig {
         Self {
             listen: "127.0.0.1:8080".parse().unwrap(),
             response_delay: 200,
-            tool_call_interval: 0,
+            tool_call_interval: None,
             vad_energy_threshold: 0.01,
             vad_silence_frames: 30,
             audio_output_dir: None,
-        }
-    }
-}
-
-impl ServerConfig {
-    /// Returns the tool call interval as an Option, where 0 means None (disabled).
-    pub fn tool_call_interval_option(&self) -> Option<u32> {
-        if self.tool_call_interval == 0 {
-            None
-        } else {
-            Some(self.tool_call_interval)
         }
     }
 }
