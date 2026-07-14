@@ -5,12 +5,13 @@ use axum::{
     Router,
     extract::{
         ConnectInfo, State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
+        ws::{CloseFrame, Message, WebSocket},
     },
     response::IntoResponse,
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -18,9 +19,88 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
+/// How a session's connection should be torn down when triggered via [`ServerControl`].
+#[derive(Debug, Clone)]
+pub enum CloseMode {
+    /// Send a WebSocket close frame with the given code and reason.
+    Frame { code: u16, reason: String },
+    /// Drop the connection without performing a WebSocket close handshake, simulating an
+    /// abrupt disconnect (e.g. a crash or network failure) rather than a clean shutdown.
+    Abrupt,
+}
+
+struct AppState {
+    config: ServerConfig,
+    control: Option<Arc<SessionControl>>,
+}
+
+/// Shared state that lets a [`ServerControl`] handle reach into the currently active
+/// session's connection loop. Only meaningful for one connection at a time, which is
+/// sufficient for test usage.
+struct SessionControl {
+    token: CancellationToken,
+    mode: CloseMode,
+}
+
+/// A handle for controlling the active session on a server started with
+/// [`run_server_with_control`]. The close code/reason (or abrupt-drop behavior) is fixed
+/// up front via [`CloseMode`]; [`ServerControl::trigger_close`] just fires it.
+#[derive(Clone)]
+pub struct ServerControl {
+    inner: Arc<SessionControl>,
+}
+
+impl ServerControl {
+    /// Tear down the active session's connection using the [`CloseMode`] configured in
+    /// [`run_server_with_control`].
+    pub fn trigger_close(&self) {
+        self.inner.token.cancel();
+    }
+}
+
 pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    run_server_inner(config, None).await
+}
+
+/// Starts the server like [`run_server`], but also returns a [`ServerControl`] handle that
+/// test code can use to close the active session's connection on demand, using the given
+/// [`CloseMode`].
+pub fn run_server_with_control(
+    config: ServerConfig,
+    mode: CloseMode,
+) -> (
+    impl Future<Output = Result<(), Box<dyn std::error::Error>>>,
+    ServerControl,
+) {
+    let inner = Arc::new(SessionControl {
+        token: CancellationToken::new(),
+        mode,
+    });
+    let control = ServerControl {
+        inner: inner.clone(),
+    };
+    (run_server_inner(config, Some(inner)), control)
+}
+
+async fn run_server_inner(
+    config: ServerConfig,
+    control: Option<Arc<SessionControl>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = config.listen;
-    let app_state = Arc::new(config);
+
+    match control.as_ref().map(|c| &c.mode) {
+        Some(CloseMode::Frame { code, reason }) => info!(
+            close_code = code,
+            close_reason = %reason,
+            "Session control enabled: sessions can be closed with a custom close frame"
+        ),
+        Some(CloseMode::Abrupt) => {
+            info!("Session control enabled: sessions can be closed abruptly (no close handshake)")
+        }
+        None => {}
+    }
+
+    let app_state = Arc::new(AppState { config, control });
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
@@ -47,20 +127,32 @@ async fn health_handler() -> impl IntoResponse {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(config): State<Arc<ServerConfig>>,
+    State(app_state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     info!(client_addr = %addr, "WebSocket upgrade request");
-    ws.on_upgrade(move |socket| handle_connection(socket, addr, (*config).clone()))
+    let config = app_state.config.clone();
+    let control = app_state.control.clone();
+    ws.on_upgrade(move |socket| handle_connection(socket, addr, config, control))
 }
 
-async fn handle_connection(socket: WebSocket, addr: SocketAddr, config: ServerConfig) {
+async fn handle_connection(
+    socket: WebSocket,
+    addr: SocketAddr,
+    config: ServerConfig,
+    control: Option<Arc<SessionControl>>,
+) {
     info!(client_addr = %addr, "WebSocket connection established");
 
     let (mut ws_sink, mut ws_stream) = socket.split();
 
-    // Create cancellation token for this connection
-    let cancellation_token = CancellationToken::new();
+    // Create cancellation token for this connection. When external control is enabled,
+    // this is a child of the control token, so triggering the control cancels this too
+    // while still letting us tell the two cases apart (see below).
+    let cancellation_token = match &control {
+        Some(control) => control.token.child_token(),
+        None => CancellationToken::new(),
+    };
 
     // Create session
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -82,8 +174,28 @@ async fn handle_connection(socket: WebSocket, addr: SocketAddr, config: ServerCo
         tokio::select! {
             // Handle cancellation
             _ = cancellation_token.cancelled() => {
-                info!(session_id = %session_id, "Session cancelled");
-                let _ = ws_sink.close().await;
+                // Distinguish an externally-triggered close (the parent control token was
+                // cancelled) from an internal one (e.g. client disconnect, error) - only the
+                // former should apply the configured CloseMode.
+                match control.as_deref().filter(|c| c.token.is_cancelled()) {
+                    Some(SessionControl { mode: CloseMode::Frame { code, reason }, .. }) => {
+                        info!(session_id = %session_id, code = code, reason = %reason, "Closing connection via control trigger");
+                        let _ = ws_sink
+                            .send(Message::Close(Some(CloseFrame {
+                                code: *code,
+                                reason: reason.clone().into(),
+                            })))
+                            .await;
+                    }
+                    Some(SessionControl { mode: CloseMode::Abrupt, .. }) => {
+                        info!(session_id = %session_id, "Dropping connection via control trigger (abrupt)");
+                        // Intentionally no close frame - just stop driving the socket.
+                    }
+                    None => {
+                        info!(session_id = %session_id, "Session cancelled");
+                        let _ = ws_sink.close().await;
+                    }
+                }
                 break;
             }
 
