@@ -99,9 +99,9 @@ async fn run_server_inner(
             close_reason = %reason,
             "Session control enabled: sessions can be closed with a custom close frame"
         ),
-        Some(CloseMode::EmptyFrame) => info!(
-            "Session control enabled: sessions can be closed with an empty close frame"
-        ),
+        Some(CloseMode::EmptyFrame) => {
+            info!("Session control enabled: sessions can be closed with an empty close frame")
+        }
         Some(CloseMode::Abrupt) => {
             info!("Session control enabled: sessions can be closed abruptly (no close handshake)")
         }
