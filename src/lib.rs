@@ -139,8 +139,13 @@
 //! # }
 //! ```
 //!
-//! Use [`CloseMode::Abrupt`] instead to drop the connection without a close handshake,
-//! simulating a crash or network failure rather than a clean shutdown.
+//! [`CloseMode`] covers three distinct wire-level scenarios:
+//!
+//! - `Frame { code, reason }` - a close handshake carrying an explicit code and reason.
+//! - `EmptyFrame` - a close handshake with no payload at all (many clients surface this as
+//!   close code 1005, "no status received").
+//! - `Abrupt` - the connection is dropped without any close handshake, simulating a crash
+//!   or network failure (many clients surface this as close code 1006, "abnormal closure").
 //!
 //! ## WebSocket Endpoints
 //!

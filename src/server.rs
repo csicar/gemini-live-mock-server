@@ -24,8 +24,13 @@ use tracing::{debug, error, info, warn};
 pub enum CloseMode {
     /// Send a WebSocket close frame with the given code and reason.
     Frame { code: u16, reason: String },
+    /// Send a well-formed close handshake with no payload at all (`Message::Close(None)`).
+    /// Distinct from [`CloseMode::Abrupt`]: the handshake still completes, it just carries
+    /// no code/reason (many clients surface this as close code 1005, "no status received").
+    EmptyFrame,
     /// Drop the connection without performing a WebSocket close handshake, simulating an
     /// abrupt disconnect (e.g. a crash or network failure) rather than a clean shutdown.
+    /// Many clients surface this as close code 1006, "abnormal closure".
     Abrupt,
 }
 
@@ -93,6 +98,9 @@ async fn run_server_inner(
             close_code = code,
             close_reason = %reason,
             "Session control enabled: sessions can be closed with a custom close frame"
+        ),
+        Some(CloseMode::EmptyFrame) => info!(
+            "Session control enabled: sessions can be closed with an empty close frame"
         ),
         Some(CloseMode::Abrupt) => {
             info!("Session control enabled: sessions can be closed abruptly (no close handshake)")
@@ -186,6 +194,10 @@ async fn handle_connection(
                                 reason: reason.clone().into(),
                             })))
                             .await;
+                    }
+                    Some(SessionControl { mode: CloseMode::EmptyFrame, .. }) => {
+                        info!(session_id = %session_id, "Closing connection via control trigger (empty close frame)");
+                        let _ = ws_sink.send(Message::Close(None)).await;
                     }
                     Some(SessionControl { mode: CloseMode::Abrupt, .. }) => {
                         info!(session_id = %session_id, "Dropping connection via control trigger (abrupt)");
