@@ -116,6 +116,37 @@
 //! The mock server will emit a `get_current_weather` tool call that your client
 //! should handle and respond to with a `ToolResponse` message.
 //!
+//! ## Simulating a Server-Initiated Disconnect
+//!
+//! To test how a client handles Gemini closing the connection (e.g. with a specific
+//! close code/reason, or an abrupt drop), start the server with
+//! [`run_server_with_control`] instead of [`run_server`]:
+//!
+//! ```rust,no_run
+//! use gemini_live_mock_server::{CloseMode, ServerConfig, run_server_with_control};
+//!
+//! # async fn example() {
+//! let config = ServerConfig::default();
+//! let (server, control) = run_server_with_control(
+//!     config,
+//!     CloseMode::Frame { code: 1008, reason: "policy violation".to_string() },
+//! );
+//! tokio::spawn(async move { server.await.unwrap(); });
+//!
+//! // ... connect a client and drive the interaction ...
+//!
+//! control.trigger_close();
+//! # }
+//! ```
+//!
+//! [`CloseMode`] covers three distinct wire-level scenarios:
+//!
+//! - `Frame { code, reason }` - a close handshake carrying an explicit code and reason.
+//! - `EmptyFrame` - a close handshake with no payload at all (many clients surface this as
+//!   close code 1005, "no status received").
+//! - `Abrupt` - the connection is dropped without any close handshake, simulating a crash
+//!   or network failure (many clients surface this as close code 1006, "abnormal closure").
+//!
 //! ## WebSocket Endpoints
 //!
 //! - `ws://<addr>/ws` - Main WebSocket endpoint
@@ -137,7 +168,7 @@ pub use protocol::{
     SetupCompleteMessage, ToolCall, ToolCallMessage, ToolResponse, VoiceActivity,
     VoiceActivityMessage, VoiceActivityType,
 };
-pub use server::run_server;
+pub use server::{CloseMode, ServerControl, run_server, run_server_with_control};
 pub use session::{Session, SessionEvent, SessionState};
 
 /// Configuration for the mock server.

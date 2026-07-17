@@ -10,6 +10,7 @@ A WebSocket mock server that implements the Gemini Live API protocol for testing
 - **Energy-based VAD** - Detect end-of-turn using audio energy levels
 - **Audio logging** - Write input/output audio to WAV files for analysis
 - **Echo mode** - Returns input audio upsampled from 16kHz to 24kHz
+- **Session close control** - From Rust test code, trigger the active session's connection to close with a specific WebSocket close code/reason, or drop abruptly (see [Simulating a Server-Initiated Disconnect](#simulating-a-server-initiated-disconnect))
 
 ## Installation
 
@@ -102,6 +103,38 @@ async def test_mock_server():
 
 asyncio.run(test_mock_server())
 ```
+
+### Simulating a Server-Initiated Disconnect
+
+For Rust integration tests that need to verify how a client handles Gemini closing the
+connection (e.g. with a specific close code/reason, or an abrupt drop), start the server
+with `run_server_with_control` instead of `run_server`:
+
+```rust
+use gemini_live_mock_server::{CloseMode, ServerConfig, run_server_with_control};
+
+let config = ServerConfig::default();
+let (server, control) = run_server_with_control(
+    config,
+    CloseMode::Frame { code: 1008, reason: "policy violation".to_string() },
+);
+tokio::spawn(async move { server.await.unwrap(); });
+
+// ... connect a client and drive the interaction ...
+
+control.trigger_close();
+```
+
+`CloseMode` covers three distinct wire-level scenarios:
+
+- `Frame { code, reason }` - a close handshake carrying an explicit code and reason.
+- `EmptyFrame` - a close handshake with no payload at all (many clients surface this as
+  close code 1005, "no status received").
+- `Abrupt` - the connection is dropped without any close handshake, simulating a crash or
+  network failure (many clients surface this as close code 1006, "abnormal closure").
+
+`ServerControl` reaches into whichever session is currently active, so this is intended for
+test scenarios with one connection at a time.
 
 ## Audio Formats
 
