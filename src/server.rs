@@ -51,9 +51,12 @@ struct SessionControl {
     received: Mutex<Vec<String>>,
     /// Reports the address the server actually bound to, so callers can use
     /// `127.0.0.1:0` in [`ServerConfig::listen`] and still know where to connect.
-    /// Populated once, right after the listener binds.
-    local_addr_tx: watch::Sender<Option<SocketAddr>>,
-    local_addr_rx: watch::Receiver<Option<SocketAddr>>,
+    /// Populated once, right after the listener binds - or with `Err` if binding failed,
+    /// so [`ServerControl::local_addr`] can report that instead of hanging forever (the
+    /// sender lives as long as this struct does, so it never drops on its own to signal
+    /// that no value is coming).
+    local_addr_tx: watch::Sender<Option<Result<SocketAddr, String>>>,
+    local_addr_rx: watch::Receiver<Option<Result<SocketAddr, String>>>,
 }
 
 /// A handle for controlling the active session on a server started with
@@ -81,11 +84,15 @@ impl ServerControl {
     /// Resolves to the address the server actually bound to. Lets callers configure
     /// [`ServerConfig::listen`] as `127.0.0.1:0` (an OS-assigned ephemeral port, safe for
     /// concurrent tests) and still learn which port to connect to.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server failed to bind its listening socket.
     pub async fn local_addr(&self) -> SocketAddr {
         let mut rx = self.inner.local_addr_rx.clone();
         loop {
-            if let Some(addr) = *rx.borrow() {
-                return addr;
+            if let Some(result) = rx.borrow().clone() {
+                return result.expect("server failed to bind its listening socket");
             }
             rx.changed()
                 .await
@@ -143,11 +150,19 @@ async fn run_server_inner(
         None => {}
     }
 
-    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
+    let listener = match tokio::net::TcpListener::bind(listen_addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            if let Some(control) = &control {
+                let _ = control.local_addr_tx.send(Some(Err(e.to_string())));
+            }
+            return Err(e.into());
+        }
+    };
     let bound_addr = listener.local_addr()?;
     info!("Mock Gemini Live server listening on {}", bound_addr);
     if let Some(control) = &control {
-        let _ = control.local_addr_tx.send(Some(bound_addr));
+        let _ = control.local_addr_tx.send(Some(Ok(bound_addr)));
     }
 
     let app_state = Arc::new(AppState { config, control });
@@ -414,5 +429,31 @@ mod tests {
         let received = control.received_messages();
         assert_eq!(received.len(), 1);
         assert!(received[0].contains("test-message-123"));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "server failed to bind its listening socket")]
+    async fn local_addr_reports_bind_failure_instead_of_hanging() {
+        // Occupy a port so the mock server's own bind attempt fails.
+        let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = blocker.local_addr().unwrap();
+
+        let config = ServerConfig {
+            listen: addr,
+            ..Default::default()
+        };
+        let (server, control) = run_server_with_control(config, CloseMode::Abrupt);
+        let _server_task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+
+        // Bound so a regression back to "hangs forever" fails loudly instead of wedging
+        // the test suite - this panics with a different message, which fails the
+        // `should_panic(expected = ...)` match above.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), control.local_addr()).await
+        {
+            Ok(addr) => panic!("expected local_addr() to panic on bind failure, got {addr}"),
+            Err(_) => panic!("local_addr() hung instead of reporting the bind failure"),
+        }
     }
 }
