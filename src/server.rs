@@ -13,8 +13,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
@@ -45,6 +45,15 @@ struct AppState {
 struct SessionControl {
     token: CancellationToken,
     mode: CloseMode,
+    /// Raw text of every client message received so far, in arrival order. Populated
+    /// regardless of whether the message parses as a well-formed [`ClientMessage`], so
+    /// tests can assert on a marker string without depending on protocol details.
+    received: Mutex<Vec<String>>,
+    /// Reports the address the server actually bound to, so callers can use
+    /// `127.0.0.1:0` in [`ServerConfig::listen`] and still know where to connect.
+    /// Populated once, right after the listener binds.
+    local_addr_tx: watch::Sender<Option<SocketAddr>>,
+    local_addr_rx: watch::Receiver<Option<SocketAddr>>,
 }
 
 /// A handle for controlling the active session on a server started with
@@ -60,6 +69,28 @@ impl ServerControl {
     /// [`run_server_with_control`].
     pub fn trigger_close(&self) {
         self.inner.token.cancel();
+    }
+
+    /// Returns the raw text of every client message received by the active session so
+    /// far, in arrival order. Useful for asserting that a particular message actually
+    /// reached the server, e.g. one sent during a shutdown grace period.
+    pub fn received_messages(&self) -> Vec<String> {
+        self.inner.received.lock().unwrap().clone()
+    }
+
+    /// Resolves to the address the server actually bound to. Lets callers configure
+    /// [`ServerConfig::listen`] as `127.0.0.1:0` (an OS-assigned ephemeral port, safe for
+    /// concurrent tests) and still learn which port to connect to.
+    pub async fn local_addr(&self) -> SocketAddr {
+        let mut rx = self.inner.local_addr_rx.clone();
+        loop {
+            if let Some(addr) = *rx.borrow() {
+                return addr;
+            }
+            rx.changed()
+                .await
+                .expect("server task dropped without reporting its bound address");
+        }
     }
 }
 
@@ -77,9 +108,13 @@ pub fn run_server_with_control(
     impl Future<Output = Result<(), Box<dyn std::error::Error>>>,
     ServerControl,
 ) {
+    let (local_addr_tx, local_addr_rx) = watch::channel(None);
     let inner = Arc::new(SessionControl {
         token: CancellationToken::new(),
         mode,
+        received: Mutex::new(Vec::new()),
+        local_addr_tx,
+        local_addr_rx,
     });
     let control = ServerControl {
         inner: inner.clone(),
@@ -108,6 +143,13 @@ async fn run_server_inner(
         None => {}
     }
 
+    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
+    let bound_addr = listener.local_addr()?;
+    info!("Mock Gemini Live server listening on {}", bound_addr);
+    if let Some(control) = &control {
+        let _ = control.local_addr_tx.send(Some(bound_addr));
+    }
+
     let app_state = Arc::new(AppState { config, control });
 
     let app = Router::new()
@@ -116,9 +158,6 @@ async fn run_server_inner(
         .route("/health", get(health_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(app_state);
-
-    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
-    info!("Mock Gemini Live server listening on {}", listen_addr);
 
     axum::serve(
         listener,
@@ -220,6 +259,9 @@ async fn handle_connection(
                             message_len = text.len(),
                             "Received text message"
                         );
+                        if let Some(control) = &control {
+                            control.received.lock().unwrap().push(text.to_string());
+                        }
                         match serde_json::from_str::<ClientMessage>(&text) {
                             Ok(client_msg) => {
                                 let msg_type = client_msg.message_type();
@@ -248,6 +290,9 @@ async fn handle_connection(
                         );
                         // Try to parse binary as JSON (some clients send as binary)
                         if let Ok(text) = String::from_utf8(data.to_vec()) {
+                            if let Some(control) = &control {
+                                control.received.lock().unwrap().push(text.clone());
+                            }
                             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                                 let msg_type = client_msg.message_type();
                                 info!(
@@ -328,4 +373,46 @@ async fn handle_connection(
         client_addr = %addr,
         "Session ended"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::SinkExt;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message as ClientWsMessage;
+
+    #[tokio::test]
+    async fn received_messages_captures_raw_client_text() {
+        let config = ServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        let (server, control) = run_server_with_control(config, CloseMode::Abrupt);
+        let _server_task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+
+        let addr = control.local_addr().await;
+
+        assert!(control.received_messages().is_empty());
+
+        let (mut ws_stream, _) = connect_async(format!("ws://{addr}/ws"))
+            .await
+            .expect("failed to connect to mock server");
+
+        let marker =
+            r#"{"clientContent":{"turns":[],"turnComplete":false},"marker":"test-message-123"}"#;
+        ws_stream
+            .send(ClientWsMessage::Text(marker.into()))
+            .await
+            .expect("failed to send message");
+
+        // Give the server a moment to process the message.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let received = control.received_messages();
+        assert_eq!(received.len(), 1);
+        assert!(received[0].contains("test-message-123"));
+    }
 }

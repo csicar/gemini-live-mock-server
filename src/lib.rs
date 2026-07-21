@@ -147,6 +147,30 @@
 //! - `Abrupt` - the connection is dropped without any close handshake, simulating a crash
 //!   or network failure (many clients surface this as close code 1006, "abnormal closure").
 //!
+//! ## Observing Received Messages
+//!
+//! The same [`ServerControl`] handle returned by [`run_server_with_control`] can also be
+//! used to inspect the raw text of every client message the active session has received
+//! so far, via [`ServerControl::received_messages`]. This is useful for asserting that a
+//! particular message actually reached the server - e.g. one sent by a client during a
+//! shutdown grace period:
+//!
+//! ```rust,no_run
+//! # use gemini_live_mock_server::{CloseMode, ServerConfig, run_server_with_control};
+//! # async fn example() {
+//! # let config = ServerConfig::default();
+//! # let (server, control) = run_server_with_control(
+//! #     config,
+//! #     CloseMode::Frame { code: 1008, reason: "policy violation".to_string() },
+//! # );
+//! # tokio::spawn(async move { server.await.unwrap(); });
+//! // ... connect a client and send some messages ...
+//!
+//! let messages = control.received_messages();
+//! assert!(messages.iter().any(|m| m.contains("expected marker")));
+//! # }
+//! ```
+//!
 //! ## WebSocket Endpoints
 //!
 //! - `ws://<addr>/ws` - Main WebSocket endpoint
