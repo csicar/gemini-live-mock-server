@@ -57,6 +57,12 @@ struct SessionControl {
     /// that no value is coming).
     local_addr_tx: watch::Sender<Option<Result<SocketAddr, String>>>,
     local_addr_rx: watch::Receiver<Option<Result<SocketAddr, String>>>,
+    /// The active connection's event sender, the same one [`Session`] uses internally to
+    /// queue outbound messages. Populated once a connection is accepted, so
+    /// [`ServerControl::send_message`] can queue a message onto the same path a real
+    /// session response would take.
+    active_event_tx: watch::Sender<Option<mpsc::Sender<SessionEvent>>>,
+    active_event_rx: watch::Receiver<Option<mpsc::Sender<SessionEvent>>>,
 }
 
 /// A handle for controlling the active session on a server started with
@@ -99,7 +105,59 @@ impl ServerControl {
                 .expect("server task dropped without reporting its bound address");
         }
     }
+
+    /// Sends `msg` to the active session's client right away, on the same delivery path
+    /// [`Session`] uses for its own responses - so it arrives as an ordinary server
+    /// message (e.g. a [`crate::protocol::ServerContentMessage`]) rather than anything
+    /// distinguishable as test-injected. Useful for asserting things like whether a
+    /// message sent during a specific window (e.g. a shutdown grace period) actually
+    /// reaches the client.
+    ///
+    /// Waits for a connection to be active if none has been accepted yet.
+    pub async fn send_message<T: serde::Serialize>(
+        &self,
+        msg: &T,
+    ) -> Result<(), SendMessageError> {
+        let json = serde_json::to_string(msg).map_err(SendMessageError::Serialize)?;
+
+        let mut rx = self.inner.active_event_rx.clone();
+        let tx = loop {
+            if let Some(tx) = rx.borrow().clone() {
+                break tx;
+            }
+            rx.changed()
+                .await
+                .map_err(|_| SendMessageError::NoActiveSession)?;
+        };
+
+        tx.send(SessionEvent::SendMessage(json))
+            .await
+            .map_err(|_| SendMessageError::NoActiveSession)
+    }
 }
+
+/// Error returned by [`ServerControl::send_message`].
+#[derive(Debug)]
+pub enum SendMessageError {
+    /// The message could not be serialized to JSON.
+    Serialize(serde_json::Error),
+    /// There is no active session's connection left to deliver the message to (it ended,
+    /// or its event channel closed).
+    NoActiveSession,
+}
+
+impl std::fmt::Display for SendMessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendMessageError::Serialize(e) => write!(f, "failed to serialize message: {e}"),
+            SendMessageError::NoActiveSession => {
+                write!(f, "no active session to deliver the message to")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SendMessageError {}
 
 pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     run_server_inner(config, None).await
@@ -116,12 +174,15 @@ pub fn run_server_with_control(
     ServerControl,
 ) {
     let (local_addr_tx, local_addr_rx) = watch::channel(None);
+    let (active_event_tx, active_event_rx) = watch::channel(None);
     let inner = Arc::new(SessionControl {
         token: CancellationToken::new(),
         mode,
         received: Mutex::new(Vec::new()),
         local_addr_tx,
         local_addr_rx,
+        active_event_tx,
+        active_event_rx,
     });
     let control = ServerControl {
         inner: inner.clone(),
@@ -219,6 +280,9 @@ async fn handle_connection(
     // Create session
     let session_id = uuid::Uuid::new_v4().to_string();
     let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(32);
+    if let Some(control) = &control {
+        let _ = control.active_event_tx.send(Some(event_tx.clone()));
+    }
     let mut session = Session::new(
         session_id.clone(),
         config,
@@ -429,6 +493,98 @@ mod tests {
         let received = control.received_messages();
         assert_eq!(received.len(), 1);
         assert!(received[0].contains("test-message-123"));
+    }
+
+    #[tokio::test]
+    async fn send_message_delivers_to_connected_client() {
+        let config = ServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        let (server, control) = run_server_with_control(config, CloseMode::Abrupt);
+        let _server_task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+
+        let addr = control.local_addr().await;
+        let (mut ws_stream, _) = connect_async(format!("ws://{addr}/ws"))
+            .await
+            .expect("failed to connect to mock server");
+
+        let msg = crate::protocol::ServerContentMessage {
+            server_content: crate::protocol::ServerContent {
+                model_turn: None,
+                turn_complete: Some(true),
+                interrupted: None,
+            },
+        };
+        control
+            .send_message(&msg)
+            .await
+            .expect("failed to send message via control");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), ws_stream.next())
+            .await
+            .expect("timed out waiting for message")
+            .expect("stream ended")
+            .expect("websocket error");
+
+        match received {
+            ClientWsMessage::Text(text) => {
+                assert!(text.contains("turnComplete"));
+            }
+            other => panic!("expected a text message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_before_any_connection_waits_then_delivers() {
+        let config = ServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        let (server, control) = run_server_with_control(config, CloseMode::Abrupt);
+        let _server_task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+
+        let addr = control.local_addr().await;
+        let control_for_send = control.clone();
+        let send_task = tokio::spawn(async move {
+            let msg = crate::protocol::ServerContentMessage {
+                server_content: crate::protocol::ServerContent {
+                    model_turn: None,
+                    turn_complete: Some(true),
+                    interrupted: None,
+                },
+            };
+            control_for_send.send_message(&msg).await
+        });
+
+        // Give send_message a moment to start waiting on a connection before one exists.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let (mut ws_stream, _) = connect_async(format!("ws://{addr}/ws"))
+            .await
+            .expect("failed to connect to mock server");
+
+        send_task
+            .await
+            .expect("send task panicked")
+            .expect("failed to send message via control");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), ws_stream.next())
+            .await
+            .expect("timed out waiting for message")
+            .expect("stream ended")
+            .expect("websocket error");
+
+        match received {
+            ClientWsMessage::Text(text) => {
+                assert!(text.contains("turnComplete"));
+            }
+            other => panic!("expected a text message, got {other:?}"),
+        }
     }
 
     #[tokio::test]
