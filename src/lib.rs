@@ -171,6 +171,32 @@
 //! # }
 //! ```
 //!
+//! ## Sending Messages On Demand
+//!
+//! [`ServerControl::send_message`] queues a message onto the active session's connection
+//! right away, on the same delivery path the mock session uses for its own responses - so
+//! it's useful for asserting things a real session wouldn't produce on its own, like
+//! whether a message sent during a specific window (e.g. a shutdown grace period) actually
+//! reaches the client:
+//!
+//! ```rust,no_run
+//! # use gemini_live_mock_server::{CloseMode, ServerConfig, ServerContent, ServerContentMessage, run_server_with_control};
+//! # async fn example() {
+//! # let config = ServerConfig::default();
+//! # let (server, control) = run_server_with_control(
+//! #     config,
+//! #     CloseMode::Frame { code: 1008, reason: "policy violation".to_string() },
+//! # );
+//! # tokio::spawn(async move { server.await.unwrap(); });
+//! // ... connect a client ...
+//!
+//! let msg = ServerContentMessage {
+//!     server_content: ServerContent { model_turn: None, turn_complete: Some(true), interrupted: None },
+//! };
+//! control.send_message(&msg).await.expect("failed to send message");
+//! # }
+//! ```
+//!
 //! ## WebSocket Endpoints
 //!
 //! - `ws://<addr>/ws` - Main WebSocket endpoint
@@ -188,11 +214,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 pub use protocol::{
-    ClientContent, ClientMessage, RealtimeInput, ServerContentMessage, SetupComplete,
-    SetupCompleteMessage, ToolCall, ToolCallMessage, ToolResponse, VoiceActivity,
+    ClientContent, ClientMessage, RealtimeInput, ServerContent, ServerContentMessage,
+    SetupComplete, SetupCompleteMessage, ToolCall, ToolCallMessage, ToolResponse, VoiceActivity,
     VoiceActivityMessage, VoiceActivityType,
 };
-pub use server::{CloseMode, ServerControl, run_server, run_server_with_control};
+pub use server::{CloseMode, SendMessageError, ServerControl, run_server, run_server_with_control};
 pub use session::{Session, SessionEvent, SessionState};
 
 /// Configuration for the mock server.
