@@ -218,7 +218,10 @@ pub use protocol::{
     SetupComplete, SetupCompleteMessage, ToolCall, ToolCallMessage, ToolResponse, VoiceActivity,
     VoiceActivityMessage, VoiceActivityType,
 };
-pub use server::{CloseMode, SendMessageError, ServerControl, run_server, run_server_with_control};
+pub use server::{
+    CloseMode, SendMessageError, ServerControl, run_server, run_server_with_addr,
+    run_server_with_control,
+};
 pub use session::{Session, SessionEvent, SessionState};
 
 /// Configuration for the mock server.
