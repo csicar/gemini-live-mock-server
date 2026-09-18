@@ -208,6 +208,19 @@ pub fn run_server_with_control(
     )
 }
 
+/// Binds with an explicit backlog instead of `TcpListener::bind`'s implicit one - tokio (via
+/// mio) hardcodes that to 128, so during a burst of concurrent connection attempts (e.g. a
+/// load test dialing many calls at once) the OS silently drops SYNs past that point rather
+/// than sending a clean RST, which looks like a multi-minute stall instead of a rejection.
+fn bind_with_backlog(addr: SocketAddr, backlog: i32) -> std::io::Result<std::net::TcpListener> {
+    let socket = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::STREAM, None)?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(backlog)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
 async fn run_server_inner(
     config: ServerConfig,
     local_addr_tx: Option<watch::Sender<Option<Result<SocketAddr, String>>>>,
@@ -230,7 +243,8 @@ async fn run_server_inner(
         None => {}
     }
 
-    let listener = match tokio::net::TcpListener::bind(listen_addr).await {
+    let listener = match bind_with_backlog(listen_addr, 1024).and_then(tokio::net::TcpListener::from_std)
+    {
         Ok(listener) => listener,
         Err(e) => {
             if let Some(tx) = &local_addr_tx {
