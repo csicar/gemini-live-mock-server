@@ -349,7 +349,6 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
- "socket2",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tokio-util",
