@@ -260,7 +260,7 @@ async fn run_server_inner(
         None => {}
     }
 
-    let listener = match bind_with_backlog(listen_addr, 1024) {
+    let listener = match bind_with_backlog(listen_addr, 4096) {
         Ok(listener) => listener,
         Err(e) => {
             if let Some(tx) = &local_addr_tx {
