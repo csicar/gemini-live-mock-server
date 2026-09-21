@@ -14,6 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use tokio::net::TcpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -208,17 +209,33 @@ pub fn run_server_with_control(
     )
 }
 
-/// Binds with an explicit backlog instead of `TcpListener::bind`'s implicit one - tokio (via
-/// mio) hardcodes that to 128, so during a burst of concurrent connection attempts (e.g. a
-/// load test dialing many calls at once) the OS silently drops SYNs past that point rather
-/// than sending a clean RST, which looks like a multi-minute stall instead of a rejection.
-fn bind_with_backlog(addr: SocketAddr, backlog: i32) -> std::io::Result<std::net::TcpListener> {
-    let socket = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::STREAM, None)?;
-    socket.set_reuse_address(true)?;
-    socket.bind(&addr.into())?;
-    socket.listen(backlog)?;
-    socket.set_nonblocking(true)?;
-    Ok(socket.into())
+/// The kernel caps whatever backlog `listen()` requests at `net.core.somaxconn` - logged at
+/// bind time so a lower-than-expected value shows up in the logs directly.
+fn effective_somaxconn() -> Option<u32> {
+    std::fs::read_to_string("/proc/sys/net/core/somaxconn")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Explicitly binds with the given backlog, instead of going through `TcpListener::bind`
+/// (which doesn't expose a way to set one).
+fn bind_with_backlog(addr: SocketAddr, backlog: u32) -> std::io::Result<tokio::net::TcpListener> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    let listener = socket.listen(backlog)?;
+    tracing::info!(
+        requested_backlog = backlog,
+        somaxconn = ?effective_somaxconn(),
+        "bound listener"
+    );
+    Ok(listener)
 }
 
 async fn run_server_inner(
@@ -243,8 +260,7 @@ async fn run_server_inner(
         None => {}
     }
 
-    let listener = match bind_with_backlog(listen_addr, 1024).and_then(tokio::net::TcpListener::from_std)
-    {
+    let listener = match bind_with_backlog(listen_addr, 1024) {
         Ok(listener) => listener,
         Err(e) => {
             if let Some(tx) = &local_addr_tx {
